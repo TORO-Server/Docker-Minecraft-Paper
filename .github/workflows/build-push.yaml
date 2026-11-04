@@ -94,6 +94,8 @@ jobs:
         id: detect-java
         run: |
           JAVA_VER=$(python updatePaper.py get-jar-version ./docker/paper.jar)
+          # Java 21 より前は保守の終わりが近いので、古い Paper (1.20.4) も 21 で動かす
+          if [ "$JAVA_VER" -lt 21 ]; then JAVA_VER=21; fi
           echo "Detected Java version: $JAVA_VER"
           echo "java_version=$JAVA_VER" >> $GITHUB_OUTPUT
 

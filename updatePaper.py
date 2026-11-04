@@ -10,6 +10,9 @@ import re
 
 USER_AGENT = 'docker-minecraft-paper-builder/1.0 (contact: malken21)'
 
+# 1.21.4 より古いが、サーバーで使っているので最終ビルドだけ作るバージョン
+EXTRA_VERSIONS = {'1.20.4'}
+
 def parse_version(v_str):
     if '-' in v_str:
         return None
@@ -123,7 +126,7 @@ def get_matrix():
     for group, v_list in data.get('versions', {}).items():
         for v in v_list:
             parsed = parse_version(v)
-            if parsed and parsed[0] >= 1 and parsed >= [1, 21, 4]:
+            if parsed and parsed[0] >= 1 and (parsed >= [1, 21, 4] or v in EXTRA_VERSIONS):
                 versions.append(v)
     
     versions.reverse() # 古い順
@@ -145,7 +148,7 @@ def get_matrix():
     
     matrix = []
     for v in versions:
-        builds_info = get_recent_builds(v, limit=10)
+        builds_info = get_recent_builds(v, limit=1 if v in EXTRA_VERSIONS else 10)
         builds_info.reverse() # 古いビルドから順に追加
         for build_info in builds_info:
             build_info['is_latest'] = (build_info['tag'] == latest_build_tag)
