@@ -1,12 +1,28 @@
 name: Release Paper Docker Images
 on:
   schedule:
-    # 毎日 UTC 0:00 (日本時間 9:00) に実行
+    # 毎日 UTC 0:00 (日本時間 9:00): 新しいビルドが出ていれば作る
     - cron: "0 0 * * *"
+    # 毎週月曜 UTC 1:00: 最新ビルドを作り直す (ベースイメージと JRE の修正を取り込む)
+    - cron: "0 1 * * 1"
   workflow_dispatch:
+    inputs:
+      rebuild_latest:
+        description: 既に GHCR にある最新ビルドも作り直す (ベースイメージや Dockerfile を変えたとき用)
+        type: boolean
+        default: false
   push:
     branches:
       - main
+  # プルリクエストでは、最新ビルドだけを amd64 で作って起動を確かめる (置かない)
+  pull_request:
+    paths:
+      - main.dockerfile
+      - updatePaper.py
+      - .github/workflows/build-push.yaml
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,13 +35,16 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Setup python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
       - name: Generate matrix
         id: set-matrix
+        env:
+          FORCE_REBUILD_LATEST: ${{ inputs.rebuild_latest || github.event.schedule == '0 1 * * 1' || github.event_name == 'pull_request' }}
+          ONLY_LATEST: ${{ github.event_name == 'pull_request' }}
         run: |
           MATRIX=$(python updatePaper.py get-matrix)
           echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
@@ -43,29 +62,33 @@ jobs:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Convert image name to lowercase
         id: prep
         run: |
-          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO_OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
           echo "owner=${REPO_OWNER}" >> $GITHUB_OUTPUT
 
       - name: Login to ghcr.io
-        uses: docker/login-action@v4
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
       - name: Download jarfile
+        env:
+          JAR_URL: ${{ matrix.url }}
+          JAR_SHA256: ${{ matrix.sha256 }}
         run: |
-          python updatePaper.py download ./docker/paper.jar "${{ matrix.url }}" "${{ matrix.sha256 }}"
+          python updatePaper.py download ./docker/paper.jar "$JAR_URL" "$JAR_SHA256"
 
       - name: Detect required Java version from jar
         id: detect-java
@@ -75,28 +98,34 @@ jobs:
           echo "java_version=$JAVA_VER" >> $GITHUB_OUTPUT
 
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v4
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Setup buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Generate tag list
         id: tags
+        env:
+          OWNER: ${{ steps.prep.outputs.owner }}
+          TAG: ${{ matrix.tag }}
+          VERSION: ${{ matrix.version }}
+          BUILD: ${{ matrix.build }}
+          IS_LATEST: ${{ matrix.is_latest }}
         run: |
-          OWNER="${{ steps.prep.outputs.owner }}"
-          TAGS="ghcr.io/${OWNER}/docker-minecraft-paper:${{ matrix.tag }}"
-          TAGS="${TAGS},ghcr.io/${OWNER}/docker-minecraft-paper:${{ matrix.version }}-latest"
-          
-          if [ "${{ matrix.is_latest }}" = "true" ]; then
+          TAGS="ghcr.io/${OWNER}/docker-minecraft-paper:${TAG}"
+          TAGS="${TAGS},ghcr.io/${OWNER}/docker-minecraft-paper:${VERSION}-latest"
+
+          if [ "$IS_LATEST" = "true" ]; then
             TAGS="${TAGS},ghcr.io/${OWNER}/docker-minecraft-paper:latest"
             TAGS="${TAGS},ghcr.io/${OWNER}/docker-minecraft-paper:latest-latest"
-            TAGS="${TAGS},ghcr.io/${OWNER}/docker-minecraft-paper:latest-${{ matrix.build }}"
+            TAGS="${TAGS},ghcr.io/${OWNER}/docker-minecraft-paper:latest-${BUILD}"
           fi
-          
+
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
 
       - name: Build local image for testing
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           file: main.dockerfile
           context: ./docker
@@ -107,37 +136,35 @@ jobs:
 
       - name: Run container test
         run: |
-          docker run --name test-server -d test-image:latest
-          sleep 5
-          LOGS=$(docker logs test-server 2>&1)
+          # 非 root のままワールドを作って、最後まで起動すること (モジュールやライブラリが足りないと、ここで止まる)
+          docker run --name test-server -d -e JAVA_TOOL_OPTIONS=-Dcom.mojang.eula.agree=true test-image:latest
+          started=false
+          for _ in $(seq 1 300); do
+            if docker logs test-server 2>&1 | grep -q 'Done ('; then started=true; break; fi
+            sleep 1
+          done
           echo "=== Container Logs ==="
-          echo "$LOGS"
+          docker logs test-server 2>&1 | tail -n 60
           echo "======================"
-          
-          if echo "$LOGS" | grep -q "Unable to access jarfile"; then
-            echo "Error: Java failed to start due to jarfile access error."
-            docker rm -f test-server
-            exit 1
-          fi
-          
-          if echo "$LOGS" | grep -iq -e "loading" -e "eula" -e "minecraft"; then
-            echo "Success: Java started PaperMC successfully."
-          else
-            echo "Error: PaperMC initialization message not found in logs."
-            docker rm -f test-server
-            exit 1
-          fi
-          
           docker rm -f test-server
+          if [ "$started" != "true" ]; then
+            echo "Error: PaperMC did not finish starting."
+            exit 1
+          fi
+
+      - name: Report image size
+        run: |
+          size=$(docker image inspect test-image:latest --format '{{.Size}}')
+          echo "Image size (amd64): $((size / 1048576)) MiB" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           file: main.dockerfile
           context: ./docker
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.tags.outputs.tags }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           build-args: |
             JAVA_VERSION=${{ steps.detect-java.outputs.java_version }}
           cache-from: type=gha,scope=${{ matrix.version }}
