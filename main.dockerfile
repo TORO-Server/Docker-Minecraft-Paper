@@ -23,7 +23,7 @@ RUN set -eu; \
       | sed -nE 's/^(.*), [A-Za-z]+ [0-9]+, [0-9]+, trustedCertEntry,$/\1/p' \
       | grep -iE 'emsign|comodoaaa|aaa ?certificate' \
       | while read -r alias; do keytool -delete -keystore "$cacerts" -storepass changeit -alias "$alias"; done; \
-    ! keytool -list -keystore "$cacerts" -storepass changeit | grep -iE 'emsign|comodoaaa|aaa ?certificate'; \
+    if keytool -list -keystore "$cacerts" -storepass changeit | grep -iE 'emsign|comodoaaa|aaa ?certificate'; then exit 1; fi; \
     install -d -o 65532 -g 65532 /out/app
 
 # java-base: distroless/java から JRE だけを除いたもの (フォント、fontconfig、CA 証明書など、JRE が使うものは入っている)
