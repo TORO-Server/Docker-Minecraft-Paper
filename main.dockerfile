@@ -1,8 +1,41 @@
 ARG JAVA_VERSION=21
-FROM gcr.io/distroless/java${JAVA_VERSION}-debian13
 
-COPY paper.jar app.jar
+# Java の実行環境を jlink で作る。入れるモジュールは Temurin の JRE と同じ (JDK の開発ツールだけを外す。
+# プラグインが何を使うか分からないので、それ以上は削らない)。小さくなるのは次の 3 つの分:
+#  - モジュールのファイルを圧縮する (--compress)
+#  - ロケールを en と ja だけにする (--include-locales)
+#  - CDS の保存ファイルを入れない (Temurin の JRE には 4 つで 57 MB ある。無くても起動が 1 秒ほど遅くなるだけ)
+FROM eclipse-temurin:${JAVA_VERSION}-jdk AS jre
+ARG JAVA_VERSION
+RUN set -eu; \
+    modules=$(java --list-modules | sed 's/@.*//' \
+      | grep -vE '^jdk\.(attach|compiler|editpad|graal\.compiler.*|hotspot\.agent|internal\.(ed|jvmstat|le|md|opt|vm\..*)|jartool|javadoc|jcmd|jconsole|jdeps|jdi|jlink|jpackage|jshell|jstatd)$' \
+      | paste -sd,); \
+    compress=zip-9; \
+    if [ "$JAVA_VERSION" -lt 21 ]; then compress=2; fi; \
+    mkdir -p /out/usr/lib/jvm /out/usr/bin; \
+    jlink --add-modules "$modules" --include-locales=en,ja --compress="$compress" \
+      --strip-debug --no-man-pages --no-header-files --output /out/usr/lib/jvm/jre; \
+    ln -s ../lib/jvm/jre/bin/java /out/usr/bin/java; \
+    # eMudhra の中間 CA の鍵が漏れた件 (JDK-8395690)。OpenJDK の案内 (https://openjdk.org/emudhra) のとおり、関係するルートを外す
+    cacerts=/out/usr/lib/jvm/jre/lib/security/cacerts; \
+    keytool -list -keystore "$cacerts" -storepass changeit 2>/dev/null \
+      | sed -nE 's/^(.*), [A-Za-z]+ [0-9]+, [0-9]+, trustedCertEntry, *$/\1/p' \
+      | grep -iE 'emsign|comodoaaa|aaa ?certificate' \
+      | while read -r alias; do keytool -delete -keystore "$cacerts" -storepass changeit -alias "$alias"; done; \
+    if keytool -list -keystore "$cacerts" -storepass changeit | grep -iE 'emsign|comodoaaa|aaa ?certificate'; then exit 1; fi; \
+    install -d -o 65532 -g 65532 /out/app
 
+# java-base: distroless/java から JRE だけを除いたもの (フォント、fontconfig、CA 証明書など、JRE が使うものは入っている)
+FROM gcr.io/distroless/java-base-debian13
+
+COPY --from=jre /out/ /
+
+COPY paper.jar /app.jar
+
+# 非 root で動かす。/app をマウントするときは、その持ち主を --user で渡す
+USER 65532:65532
 WORKDIR /app
 
+ENTRYPOINT ["/usr/bin/java", "-jar"]
 CMD ["../app.jar"]
