@@ -18,7 +18,7 @@ PaperMC (Minecraft サーバー) の最小限の Docker イメージを自動ビ
   - `latest-${build}`
 
 > [!NOTE]
-> 現在のスクリプトの設定により、Minecraft `1.21.4` 以上のバージョンが自動ビルドおよびパブリッシュの対象となっている。
+> 自動ビルドの対象は、Minecraft `1.21.4` 以上のバージョンと、`1.20.4` (最後のビルドだけ) です。対象の条件の正本は `updatePaper.py` です。
 
 ## 使い方
 
@@ -70,3 +70,7 @@ GitHub Actions ワークフローでビルドプロセスを制御するため�
   ```bash
   python updatePaper.py verify-java <jarファイルのパス> <Dockerfileのパス>
   ```
+
+## 関連文書
+
+文章の書き方: [WRITING-STYLE.md](https://github.com/TORO-Server/TORO-Website/blob/main/docs/WRITING-STYLE.md)
